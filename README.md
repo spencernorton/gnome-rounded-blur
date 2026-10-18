@@ -6,9 +6,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/spencercnorton/norvi-os"><img alt="Part of NorviOS" src="https://img.shields.io/badge/NorviOS-component-FD8024.svg"></a>
-  <a href="https://github.com/spencercnorton/gnome-rounded-blur/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/spencercnorton/gnome-rounded-blur/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/spencercnorton/gnome-rounded-blur/tags"><img alt="Latest release" src="https://img.shields.io/github/v/tag/spencercnorton/gnome-rounded-blur?label=release&sort=semver"></a>
+  <a href="https://github.com/spencernorton/norvi-os"><img alt="Part of NorviOS" src="https://img.shields.io/badge/NorviOS-component-FD8024.svg"></a>
+  <a href="https://github.com/spencernorton/gnome-rounded-blur/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/spencernorton/gnome-rounded-blur/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/spencernorton/gnome-rounded-blur/tags"><img alt="Latest release" src="https://img.shields.io/github/v/tag/spencercnorton/gnome-rounded-blur?label=release&sort=semver"></a>
   <a href="#install"><img alt="Install from the release" src="https://img.shields.io/badge/install-.deb-2D2D2D.svg"></a>
   <a href="LICENSE"><img alt="Licence" src="https://img.shields.io/badge/licence-GPL--3.0--or--later-blue.svg"></a>
   <a href="https://buy.stripe.com/8x26oH2U44f65TRe574wM04"><img alt="Donate" src="https://img.shields.io/badge/donate-Stripe-635bff.svg?logo=stripe&logoColor=white"></a>
@@ -17,7 +17,7 @@
 This is the Ubuntu packaging of [kancko/gnome-rounded-blur](https://github.com/kancko/gnome-rounded-blur), a copy of gnome-shell's
 [ShellBlurEffect](https://github.com/GNOME/gnome-shell/blob/main/src/shell-blur-effect.c)
 with a corner mask added and its GIR namespace changed to `Blur`. It carries upstream's code plus two small changes, listed below. It is
-the library behind the rounded blur of the [NorviOS](https://github.com/spencercnorton/norvi-os) desktop's dock, menus and windows.
+the library behind the rounded blur of the [NorviOS](https://github.com/spencernorton/norvi-os) desktop's dock, menus and windows.
 
 ## What it does
 
@@ -36,7 +36,7 @@ library that can no longer load. The corners then go square, visibly, until a re
 ### Ubuntu 26.04 — the release package
 
 Download `gnome-rounded-blur_*_amd64.deb` and `SHA256SUMS.txt` from the
-[latest release](https://github.com/spencercnorton/gnome-rounded-blur/releases/latest), check it, and install it:
+[latest release](https://github.com/spencernorton/gnome-rounded-blur/releases/latest), check it, and install it:
 
 ```bash
 sha256sum --check --ignore-missing SHA256SUMS.txt
@@ -89,8 +89,8 @@ It also restores gnome-shell's 2019 copyright line on the two files derived from
 
 ## Contributing and support
 
-- Bugs and feature requests: [open an issue](https://github.com/spencercnorton/gnome-rounded-blur/issues/new/choose). A problem in the blur itself is usually upstream's, at [kancko/gnome-rounded-blur](https://github.com/kancko/gnome-rounded-blur/issues).
-- Security reports: [private vulnerability reporting](https://github.com/spencercnorton/gnome-rounded-blur/security/advisories/new). See [SECURITY.md](SECURITY.md). There is no e-mail address; that is deliberate.
+- Bugs and feature requests: [open an issue](https://github.com/spencernorton/gnome-rounded-blur/issues/new/choose). A problem in the blur itself is usually upstream's, at [kancko/gnome-rounded-blur](https://github.com/kancko/gnome-rounded-blur/issues).
+- Security reports: [private vulnerability reporting](https://github.com/spencernorton/gnome-rounded-blur/security/advisories/new). See [SECURITY.md](SECURITY.md). There is no e-mail address; that is deliberate.
 - Pull requests are welcome; read [CONTRIBUTING.md](CONTRIBUTING.md) first. Changes are reviewed and merged on GitHub, then shipped in tagged releases.
 - If this saves you time, you can [support its development](https://buy.stripe.com/8x26oH2U44f65TRe574wM04).
 
