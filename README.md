@@ -8,11 +8,25 @@
 <p align="center">
   <a href="https://github.com/spencernorton/norvi-os"><img alt="Part of NorviOS" src="https://img.shields.io/badge/NorviOS-component-FD8024.svg"></a>
   <a href="https://github.com/spencernorton/gnome-rounded-blur/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/spencernorton/gnome-rounded-blur/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/spencernorton/gnome-rounded-blur/tags"><img alt="Latest release" src="https://img.shields.io/github/v/tag/spencercnorton/gnome-rounded-blur?label=release&sort=semver"></a>
+  <a href="https://github.com/spencernorton/gnome-rounded-blur/tags"><img alt="Latest release" src="https://img.shields.io/github/v/tag/spencernorton/gnome-rounded-blur?label=release&sort=semver"></a>
   <a href="#install"><img alt="Install from the release" src="https://img.shields.io/badge/install-.deb-2D2D2D.svg"></a>
   <a href="LICENSE"><img alt="Licence" src="https://img.shields.io/badge/licence-GPL--3.0--or--later-blue.svg"></a>
   <a href="https://buy.stripe.com/8x26oH2U44f65TRe574wM04"><img alt="Donate" src="https://img.shields.io/badge/donate-Stripe-635bff.svg?logo=stripe&logoColor=white"></a>
 </p>
+
+```mermaid
+flowchart LR
+    Backdrop[Pixels behind a Shell actor] --> Blur[Background blur]
+    Blur --> Mask[Rounded corner mask]
+    Mask --> Composite[Composite the actor]
+    Radius[Extension chooses radius and brightness] --> Blur
+    Radius --> Mask
+```
+
+The corner mask runs inside `Blur.BlurEffect`, before the blurred backdrop is
+composited. Extensions such as XDock use the library; it has no standalone window or CLI.
+
+
 
 This is the Ubuntu packaging of [kancko/gnome-rounded-blur](https://github.com/kancko/gnome-rounded-blur), a copy of gnome-shell's
 [ShellBlurEffect](https://github.com/GNOME/gnome-shell/blob/main/src/shell-blur-effect.c)
