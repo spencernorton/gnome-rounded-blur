@@ -6,10 +6,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/spencernorton/norvi-os"><img alt="Part of NorviOS" src="https://img.shields.io/badge/NorviOS-component-FD8024.svg"></a>
+  <a href="https://norvitech.com/norvi-os/"><img alt="Part of NorviOS" src="https://img.shields.io/badge/NorviOS-component-FD8024.svg"></a>
   <a href="https://github.com/spencernorton/gnome-rounded-blur/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/spencernorton/gnome-rounded-blur/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/spencernorton/gnome-rounded-blur/tags"><img alt="Latest release" src="https://img.shields.io/github/v/tag/spencernorton/gnome-rounded-blur?label=release&sort=semver"></a>
-  <a href="#install"><img alt="Install from the release" src="https://img.shields.io/badge/install-.deb-2D2D2D.svg"></a>
+  <a href="https://github.com/spencernorton/gnome-rounded-blur/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/spencernorton/gnome-rounded-blur?label=release"></a>
+  <a href="https://norvitech.com/#install"><img alt="APT repository" src="https://img.shields.io/badge/apt-Ubuntu%2026.04-e95420.svg?logo=ubuntu&logoColor=white"></a>
   <a href="LICENSE"><img alt="Licence" src="https://img.shields.io/badge/licence-GPL--3.0--or--later-blue.svg"></a>
   <a href="https://buy.stripe.com/8x26oH2U44f65TRe574wM04"><img alt="Donate" src="https://img.shields.io/badge/donate-Stripe-635bff.svg?logo=stripe&logoColor=white"></a>
 </p>
@@ -46,6 +46,17 @@ matching `libmutter` runtime, so when a GNOME release moves to a new mutter ABI,
 library that can no longer load. The corners then go square, visibly, until a rebuild.
 
 ## Install
+
+### Ubuntu 26.04 — from the APT repository
+
+Use the [NorviTech APT repository](https://norvitech.com/#install) for automatic updates:
+
+```bash
+curl -fsSL https://apt.norvitech.com/setup.sh | sudo sh
+sudo apt install gnome-rounded-blur
+```
+
+Log out and back in to load the library in GNOME Shell.
 
 ### Ubuntu 26.04 — the release package
 
