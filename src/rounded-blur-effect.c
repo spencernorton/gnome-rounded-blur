@@ -1,6 +1,6 @@
 /* rounded-blur-effect.c
  *
- * Copyright 2019 Georges Basile Stavracas Neto <georges.stavracas@gmail.com>
+ * Copyright 2019 Georges Basile Stavracas Neto
  * Copyright 2025 GNOME Rounded Blur
  *
  * This program is free software: you can redistribute it and/or modify
@@ -54,6 +54,40 @@ static const gchar *mask_glsl =
 "  cogl_color_out.rgb *= m;                                                \n"
 "  cogl_color_out.a   *= m;                                                \n";
 
+/* Dual Kawase blur (Marius Bjørge, SIGGRAPH 2015), using the kernels of KWin's
+ * blur effect (src/plugins/blur/shaders/downsample.frag and upsample.frag).
+ * `halfpixel` is half a texel of the texture being read; `offset` sets the
+ * spread. Each pass reads one level and writes the next, at half or double size.
+ */
+static const gchar *kawase_glsl_declarations =
+"uniform vec2 halfpixel;                                                   \n"
+"uniform float offset;                                                     \n";
+
+static const gchar *kawase_down_glsl =
+"  vec2 uv = cogl_tex_coord.st;                                            \n"
+"  vec2 o = halfpixel * offset;                                            \n"
+"  vec4 sum = texture2D (cogl_sampler, uv) * 4.0;                          \n"
+"  sum += texture2D (cogl_sampler, uv - o);                                \n"
+"  sum += texture2D (cogl_sampler, uv + o);                                \n"
+"  sum += texture2D (cogl_sampler, uv + vec2 (o.x, -o.y));                 \n"
+"  sum += texture2D (cogl_sampler, uv - vec2 (o.x, -o.y));                 \n"
+"  cogl_texel = sum / 8.0;                                                 \n";
+
+static const gchar *kawase_up_glsl =
+"  vec2 uv = cogl_tex_coord.st;                                            \n"
+"  vec2 o = halfpixel * offset;                                            \n"
+"  vec4 sum = texture2D (cogl_sampler, uv + vec2 (-o.x * 2.0, 0.0));       \n"
+"  sum += texture2D (cogl_sampler, uv + vec2 (-o.x, o.y)) * 2.0;           \n"
+"  sum += texture2D (cogl_sampler, uv + vec2 (0.0, o.y * 2.0));            \n"
+"  sum += texture2D (cogl_sampler, uv + vec2 (o.x, o.y)) * 2.0;            \n"
+"  sum += texture2D (cogl_sampler, uv + vec2 (o.x * 2.0, 0.0));            \n"
+"  sum += texture2D (cogl_sampler, uv + vec2 (o.x, -o.y)) * 2.0;           \n"
+"  sum += texture2D (cogl_sampler, uv + vec2 (0.0, -o.y * 2.0));           \n"
+"  sum += texture2D (cogl_sampler, uv + vec2 (-o.x, -o.y)) * 2.0;          \n"
+"  cogl_texel = sum / 12.0;                                                \n";
+
+#define KAWASE_MAX_ITERATIONS 4
+
 #define MIN_DOWNSCALE_SIZE 256.f
 #define MAX_RADIUS 12.f
 
@@ -97,9 +131,55 @@ struct _GbBlurEffect
   int radius;
 
   float corner_radius;
+
+  /* Dual Kawase chain for BACKGROUND mode. Every target is allocated when the
+   * size or pass count changes and reused on every other frame: no texture or
+   * framebuffer is created or freed per paint. down[i] is 1/2^(i+1) of the
+   * captured background; up[k] has the size of down[k]. */
+  gboolean use_kawase;
+  int kawase_iterations;
+  float kawase_offset;
+  FramebufferData kawase_down[KAWASE_MAX_ITERATIONS];
+  FramebufferData kawase_up[KAWASE_MAX_ITERATIONS - 1];
+  CoglPipeline *kawase_bg_pipeline;
+  unsigned int kawase_alloc_width;
+  unsigned int kawase_alloc_height;
+  int kawase_alloc_iterations;
+  float kawase_alloc_offset;
+
+  /* Reuse (BACKGROUND + Kawase): when cache_background is set, the blurred
+   * result is painted again without capturing or blurring, until invalidate()
+   * says something behind the actor changed, or its box or stage view moved.
+   * Off by default, so callers that never invalidate keep re-blurring. */
+  gboolean cache_background;
+  gboolean background_dirty;
+
+  /* Kawase final stage: brightness and the rounded mask in one pass that reads
+   * brightness_fb directly (no separate mask target). Uniforms are written only
+   * when a value changes, because Cogl has no equality check and every write
+   * notifies (and can copy or flush) the pipeline. */
+  CoglPipeline *kawase_final_pipeline;
+  int kf_brightness_uniform;
+  int kf_corner_radius_uniform;
+  int kf_size_uniform;
+  float kf_brightness;
+  float kf_corner_radius;
+  float kf_width;
+  float kf_height;
+  float last_brightness;
+  float last_corner_radius;
+  float last_mask_width;
+  float last_mask_height;
+  int last_paint_opacity;
+  ClutterActorBox cache_box;
+  ClutterStageView *cache_view;
+  gboolean cache_complete;   /* the last capture covered the actor inside one view */
 };
 
 G_DEFINE_TYPE (GbBlurEffect, gb_blur_effect, CLUTTER_TYPE_EFFECT)
+
+/* NORVI_BLUR_ALGORITHM=gaussian restores the previous per-paint Gaussian path. */
+static gboolean kawase_disabled = FALSE;
 
 enum {
   PROP_0,
@@ -107,6 +187,7 @@ enum {
   PROP_BRIGHTNESS,
   PROP_MODE,
   PROP_CORNER_RADIUS,
+  PROP_CACHE_BACKGROUND,
   N_PROPS
 };
 
@@ -181,11 +262,67 @@ create_mask_pipeline (void)
   return cogl_pipeline_copy (mask_pipeline);
 }
 
+static CoglPipeline *
+create_kawase_final_pipeline (void)
+{
+  static CoglPipeline *final_pipeline = NULL;
+
+  if (G_UNLIKELY (final_pipeline == NULL))
+    {
+      CoglSnippet *snippet;
+
+      final_pipeline = create_mask_pipeline ();
+      snippet = cogl_snippet_new (COGL_SNIPPET_HOOK_FRAGMENT,
+                                  brightness_glsl_declarations,
+                                  brightness_glsl);
+      cogl_pipeline_add_snippet (final_pipeline, snippet);
+      g_object_unref (snippet);
+    }
+
+  return cogl_pipeline_copy (final_pipeline);
+}
+
+static void
+update_kawase_final (GbBlurEffect *self,
+                     float          width,
+                     float          height)
+{
+  CoglPipeline *p = self->kawase_final_pipeline;
+
+  if (self->kf_brightness != self->brightness)
+    {
+      self->kf_brightness = self->brightness;
+      if (self->kf_brightness_uniform > -1)
+        cogl_pipeline_set_uniform_1f (p, self->kf_brightness_uniform, self->brightness);
+    }
+  if (self->kf_corner_radius != self->corner_radius)
+    {
+      self->kf_corner_radius = self->corner_radius;
+      if (self->kf_corner_radius_uniform > -1)
+        cogl_pipeline_set_uniform_1f (p, self->kf_corner_radius_uniform, self->corner_radius);
+    }
+  if (self->kf_width != width || self->kf_height != height)
+    {
+      const float size[2] = { width, height };
+
+      self->kf_width = width;
+      self->kf_height = height;
+      if (self->kf_size_uniform > -1)
+        cogl_pipeline_set_uniform_float (p, self->kf_size_uniform, 2, 1, size);
+    }
+}
+
 static void
 update_brightness (GbBlurEffect *self,
                    uint8_t        paint_opacity)
 {
   CoglColor color;
+
+  if (self->last_paint_opacity == paint_opacity &&
+      self->last_brightness == self->brightness)
+    return;
+  self->last_paint_opacity = paint_opacity;
+  self->last_brightness = self->brightness;
 
   cogl_color_init_from_4f (&color,
                            paint_opacity / 255.0, paint_opacity / 255.0,
@@ -207,6 +344,13 @@ update_mask_uniforms (GbBlurEffect *self,
 {
   if (!self->mask_fb.pipeline)
     return;
+
+  if (self->last_mask_width == width && self->last_mask_height == height &&
+      self->last_corner_radius == self->corner_radius)
+    return;
+  self->last_mask_width = width;
+  self->last_mask_height = height;
+  self->last_corner_radius = self->corner_radius;
 
   if (self->corner_radius_uniform > -1)
     cogl_pipeline_set_uniform_1f (self->mask_fb.pipeline,
@@ -236,6 +380,171 @@ setup_projection_matrix (CoglFramebuffer *framebuffer,
   graphene_matrix_scale (&projection, 2.0 / width, -2.0 / height, 1.f);
 
   cogl_framebuffer_set_projection_matrix (framebuffer, &projection);
+}
+
+static CoglPipeline *
+create_kawase_pipeline (gboolean up)
+{
+  static CoglPipeline *down_base = NULL;
+  static CoglPipeline *up_base = NULL;
+  CoglPipeline **base = up ? &up_base : &down_base;
+
+  if (G_UNLIKELY (*base == NULL))
+    {
+      CoglSnippet *snippet;
+
+      *base = create_base_pipeline ();
+      snippet = cogl_snippet_new (COGL_SNIPPET_HOOK_TEXTURE_LOOKUP,
+                                  kawase_glsl_declarations,
+                                  NULL);
+      cogl_snippet_set_replace (snippet, up ? kawase_up_glsl : kawase_down_glsl);
+      cogl_pipeline_add_layer_snippet (*base, 0, snippet);
+      g_object_unref (snippet);
+    }
+
+  return cogl_pipeline_copy (*base);
+}
+
+static void
+set_kawase_uniforms (CoglPipeline *pipeline,
+                     CoglTexture  *source,
+                     float         offset)
+{
+  int location;
+  float halfpixel[2];
+
+  halfpixel[0] = 0.5f / MAX (cogl_texture_get_width (source), 1);
+  halfpixel[1] = 0.5f / MAX (cogl_texture_get_height (source), 1);
+
+  location = cogl_pipeline_get_uniform_location (pipeline, "halfpixel");
+  if (location > -1)
+    cogl_pipeline_set_uniform_float (pipeline, location, 2, 1, halfpixel);
+
+  location = cogl_pipeline_get_uniform_location (pipeline, "offset");
+  if (location > -1)
+    cogl_pipeline_set_uniform_1f (pipeline, location, offset);
+}
+
+/* Pass count and spread that match a Gaussian of sigma = radius / 2, the
+ * convention of ClutterBlur. Fitted on step responses (mean error < 0.3%):
+ * 4..8 -> 1 pass, ..20 -> 2, ..60 -> 3 (radius 30: offset 2.5), above -> 4. */
+static void
+kawase_params_for_radius (int    radius,
+                          int   *iterations,
+                          float *offset)
+{
+  float r = (float) radius;
+
+  if (r <= 8.f)
+    {
+      *iterations = 1;
+      *offset = CLAMP (0.25f * r + 0.5f, 1.f, 2.f);
+    }
+  else if (r <= 20.f)
+    {
+      *iterations = 2;
+      *offset = CLAMP (2.f + (r - 12.f) / 6.f, 2.f, 3.f);
+    }
+  else if (r <= 60.f)
+    {
+      *iterations = 3;
+      *offset = CLAMP (2.f + (r - 24.f) / 12.f, 2.f, 5.f);
+    }
+  else
+    {
+      *iterations = 4;
+      *offset = CLAMP (3.25f + (r - 80.f) / 20.f, 3.f, 8.f);
+    }
+}
+
+static void
+clear_kawase (GbBlurEffect *self)
+{
+  for (int i = 0; i < KAWASE_MAX_ITERATIONS; i++)
+    {
+      g_clear_object (&self->kawase_down[i].texture);
+      g_clear_object (&self->kawase_down[i].framebuffer);
+      g_clear_object (&self->kawase_down[i].pipeline);
+    }
+  for (int k = 0; k < KAWASE_MAX_ITERATIONS - 1; k++)
+    {
+      g_clear_object (&self->kawase_up[k].texture);
+      g_clear_object (&self->kawase_up[k].framebuffer);
+      g_clear_object (&self->kawase_up[k].pipeline);
+    }
+  g_clear_object (&self->kawase_bg_pipeline);
+  self->kawase_alloc_width = 0;
+  self->kawase_alloc_height = 0;
+  self->kawase_alloc_iterations = 0;
+}
+
+static gboolean update_fbo (FramebufferData *data, unsigned int width,
+                            unsigned int height, float downscale_factor);
+
+/* Allocate the chain for a capture of width x height, only when that size or the
+ * pass count changed. Returns FALSE if a target could not be created. */
+static gboolean
+update_kawase_fbos (GbBlurEffect *self,
+                    unsigned int   width,
+                    unsigned int   height)
+{
+  int n = self->kawase_iterations;
+
+  if (self->kawase_alloc_width == width &&
+      self->kawase_alloc_height == height &&
+      self->kawase_alloc_iterations == n &&
+      self->kawase_down[0].framebuffer &&
+      self->kawase_bg_pipeline)
+    {
+      if (self->kawase_alloc_offset != self->kawase_offset)
+        {
+          set_kawase_uniforms (self->kawase_bg_pipeline, self->background_fb.texture,
+                               self->kawase_offset);
+          for (int i = 0; i < n; i++)
+            set_kawase_uniforms (self->kawase_down[i].pipeline,
+                                 self->kawase_down[i].texture, self->kawase_offset);
+          for (int k = 0; k < n - 1; k++)
+            set_kawase_uniforms (self->kawase_up[k].pipeline,
+                                 self->kawase_up[k].texture, self->kawase_offset);
+          self->kawase_alloc_offset = self->kawase_offset;
+        }
+      return TRUE;
+    }
+
+  clear_kawase (self);
+
+  for (int i = 0; i < n; i++)
+    {
+      FramebufferData *data = &self->kawase_down[i];
+
+      /* every level but the last is read by a downsample; the last by the first upsample */
+      data->pipeline = create_kawase_pipeline (i == n - 1);
+      if (!update_fbo (data, width, height, (float) (1 << (i + 1))))
+        return FALSE;
+      set_kawase_uniforms (data->pipeline, data->texture, self->kawase_offset);
+    }
+
+  for (int k = 0; k < n - 1; k++)
+    {
+      FramebufferData *data = &self->kawase_up[k];
+
+      data->pipeline = create_kawase_pipeline (TRUE);
+      if (!update_fbo (data, width, height, (float) (1 << (k + 1))))
+        return FALSE;
+      set_kawase_uniforms (data->pipeline, data->texture, self->kawase_offset);
+    }
+
+  self->kawase_bg_pipeline = create_kawase_pipeline (FALSE);
+  cogl_pipeline_set_layer_texture (self->kawase_bg_pipeline, 0, self->background_fb.texture);
+  set_kawase_uniforms (self->kawase_bg_pipeline, self->background_fb.texture,
+                       self->kawase_offset);
+
+  self->kawase_alloc_width = width;
+  self->kawase_alloc_height = height;
+  self->kawase_alloc_iterations = n;
+  self->kawase_alloc_offset = self->kawase_offset;
+
+  return TRUE;
 }
 
 static gboolean
@@ -397,10 +706,14 @@ gb_blur_effect_set_actor (ClutterActorMeta *meta,
   clear_framebuffer_data (&self->background_fb);
   clear_framebuffer_data (&self->brightness_fb);
   clear_framebuffer_data (&self->mask_fb);
+  clear_kawase (self);
 
   /* A new actor must not reuse the old one's cached content, or its texture
    * size to decide whether the framebuffers still fit. */
   self->cache_flags = 0;
+  self->background_dirty = TRUE;
+  self->cache_view = NULL;
+  self->cache_complete = FALSE;
   self->tex_width = 0;
   self->tex_height = 0;
   self->downscale_factor = 1.f;
@@ -471,6 +784,17 @@ add_blurred_pipeline (GbBlurEffect    *self,
    */
   clutter_actor_get_size (self->actor, &width, &height);
 
+  if (self->use_kawase && self->kawase_final_pipeline)
+    {
+      update_kawase_final (self, width, height);
+      pipeline_node = clutter_pipeline_node_new (self->kawase_final_pipeline);
+      clutter_paint_node_set_static_name (pipeline_node, "GbBlurEffect (cached)");
+      clutter_paint_node_add_child (node, pipeline_node);
+      clutter_paint_node_add_rectangle (pipeline_node,
+                                        &(ClutterActorBox) { 0.f, 0.f, width, height });
+      return;
+    }
+
   update_brightness (self, paint_opacity);
   update_mask_uniforms (self, width, height);
 
@@ -539,6 +863,82 @@ create_blur_nodes (GbBlurEffect    *self,
   return g_steal_pointer (&blur_node);
 }
 
+static ClutterPaintNode *
+add_pass (ClutterPaintNode *parent,
+          FramebufferData  *target,
+          CoglPipeline     *composite_pipeline,
+          float             parent_width,
+          float             parent_height,
+          const char       *name)
+{
+  ClutterPaintNode *layer;
+
+  /* Render the children into `target`, then draw target's texture into the
+   * parent through `composite_pipeline`: that draw is the Kawase pass. */
+  layer = clutter_layer_node_new_to_framebuffer (target->framebuffer, composite_pipeline);
+  clutter_paint_node_set_static_name (layer, name);
+  clutter_paint_node_add_child (parent, layer);
+  clutter_paint_node_add_rectangle (layer,
+                                    &(ClutterActorBox) {
+                                      0.f, 0.f, parent_width, parent_height,
+                                    });
+  clutter_paint_node_unref (layer);   /* the parent holds it */
+  return layer;
+}
+
+/* mask > brightness > up[0] > ... > up[n-2] > down[n-1] > ... > down[0]; the
+ * captured background is added inside down[0] by paint_background(). Painting
+ * runs innermost first, so the background is downsampled n times and upsampled
+ * back to half size, all in targets that already exist. */
+static ClutterPaintNode *
+create_kawase_nodes (GbBlurEffect    *self,
+                     ClutterPaintNode *node,
+                     uint8_t           paint_opacity)
+{
+  g_autoptr (ClutterPaintNode) mask_node = NULL;
+  ClutterPaintNode *parent;
+  float width, height, pw, ph;
+  int n = self->kawase_alloc_iterations;
+
+  clutter_actor_get_size (self->actor, &width, &height);
+  (void) paint_opacity;                 /* always 255 in BACKGROUND mode */
+
+  update_kawase_final (self, width, height);
+  mask_node = clutter_layer_node_new_to_framebuffer (self->brightness_fb.framebuffer,
+                                                     self->kawase_final_pipeline);
+  clutter_paint_node_set_static_name (mask_node, "GbBlurEffect (final: brightness + mask)");
+  clutter_paint_node_add_child (node, mask_node);
+  clutter_paint_node_add_rectangle (mask_node,
+                                    &(ClutterActorBox) { 0.f, 0.f, width, height });
+  parent = mask_node;
+  pw = cogl_texture_get_width (self->brightness_fb.texture);
+  ph = cogl_texture_get_height (self->brightness_fb.texture);
+
+  /* upsample chain, outermost (largest) first */
+  for (int k = 0; k < n - 1; k++)
+    {
+      FramebufferData *up = &self->kawase_up[k];
+
+      parent = add_pass (parent, up, up->pipeline, pw, ph, "GbBlurEffect (kawase up)");
+      pw = cogl_texture_get_width (up->texture);
+      ph = cogl_texture_get_height (up->texture);
+    }
+
+  /* downsample chain, smallest first */
+  for (int i = n - 1; i >= 0; i--)
+    {
+      FramebufferData *down = &self->kawase_down[i];
+
+      parent = add_pass (parent, down, down->pipeline, pw, ph, "GbBlurEffect (kawase down)");
+      pw = cogl_texture_get_width (down->texture);
+      ph = cogl_texture_get_height (down->texture);
+    }
+
+  self->cache_flags |= BLUR_APPLIED;
+
+  return clutter_paint_node_ref (parent);
+}
+
 static void
 paint_background (GbBlurEffect      *self,
                   ClutterPaintNode    *node,
@@ -563,7 +963,8 @@ paint_background (GbBlurEffect      *self,
   /* Background layer node */
   background_node =
     clutter_layer_node_new_to_framebuffer (self->background_fb.framebuffer,
-                                           self->background_fb.pipeline);
+                                           self->use_kawase ? self->kawase_bg_pipeline
+                                                            : self->background_fb.pipeline);
   clutter_paint_node_set_static_name (background_node, "GbBlurEffect (background)");
   clutter_paint_node_add_child (node, background_node);
   clutter_paint_node_add_rectangle (background_node,
@@ -597,6 +998,41 @@ update_framebuffers (GbBlurEffect       *self,
   float width = -1;
 
   clutter_actor_box_get_size (source_actor_box, &width, &height);
+
+  /* A minimize or restore animation can project the actor to less than one
+   * pixel. Keep its targets for the next frame and paint the actor directly. */
+  if (width < 1.f || height < 1.f)
+    return FALSE;
+
+  /* Kawase works at half size and below; a capture under 4 px in either
+   * direction keeps the full-resolution Gaussian path instead. */
+  self->use_kawase = !kawase_disabled && self->mode == GB_BLUR_MODE_BACKGROUND &&
+                     width >= 4.f && height >= 4.f;
+  if (self->use_kawase)
+    {
+      int n;
+      float offset;
+
+      kawase_params_for_radius (self->radius, &n, &offset);
+      /* never shrink a level below one pixel */
+      while (n > 1 && (MIN (width, height) / (float) (1 << n)) < 1.f)
+        n--;
+      self->kawase_iterations = n;
+      self->kawase_offset = offset;
+      downscale_factor = 2.f;           /* the result lives at half size */
+
+      updated = update_brightness_fbo (self, width, height, downscale_factor) &&
+                update_background_fbo (self, width, height);
+      self->tex_width = width;
+      self->tex_height = height;
+      self->downscale_factor = downscale_factor;
+      if (updated && self->kawase_final_pipeline &&
+          cogl_pipeline_get_layer_texture (self->kawase_final_pipeline, 0) !=
+          self->brightness_fb.texture)
+        cogl_pipeline_set_layer_texture (self->kawase_final_pipeline, 0,
+                                         self->brightness_fb.texture);
+      return updated && update_kawase_fbos (self, width, height);
+    }
 
   downscale_factor = calculate_downscale_factor (width, height, self->radius);
 
@@ -702,10 +1138,29 @@ needs_repaint (GbBlurEffect         *self,
       return actor_dirty || !blur_cached || !actor_cached;
 
     case GB_BLUR_MODE_BACKGROUND:
-      return TRUE;
+      return !(self->use_kawase && self->cache_background &&
+               !self->background_dirty && blur_cached);
     }
 
   return TRUE;
+}
+
+/* TRUE if the box lies inside one stage view: a window spanning monitors is
+ * painted once per view, and one cache cannot serve two captures. */
+static gboolean
+box_within_view (ClutterPaintContext *paint_context,
+                 ClutterActorBox     *box)
+{
+  ClutterStageView *view = clutter_paint_context_get_stage_view (paint_context);
+  MtkRectangle layout;
+  float scale;
+
+  if (!view)
+    return FALSE;
+  clutter_stage_view_get_layout (view, &layout);
+  scale = clutter_stage_view_get_scale (view);
+  return box->x1 >= 0.f && box->y1 >= 0.f &&
+         box->x2 <= layout.width * scale && box->y2 <= layout.height * scale;
 }
 
 static void
@@ -738,6 +1193,26 @@ gb_blur_effect_paint_node (ClutterEffect           *effect,
           break;
         }
 
+      if (self->mode == GB_BLUR_MODE_BACKGROUND && self->cache_background &&
+          !clutter_paint_context_get_stage_view (paint_context))
+        {
+          /* Offscreen paint (a screenshot, or a window screencast painting the
+           * window alone): a capture here would see only what this paint drew,
+           * so show the cached glass if it is a complete, current capture. */
+          if (!self->cache_complete || self->background_dirty)
+            self->background_dirty = TRUE;
+        }
+      else if (self->mode == GB_BLUR_MODE_BACKGROUND && self->cache_background)
+        {
+          ClutterActorBox box;
+
+          update_actor_box (self, paint_context, &box);
+          if (!box_within_view (paint_context, &box) ||
+              !clutter_actor_box_equal (&box, &self->cache_box) ||
+              clutter_paint_context_get_stage_view (paint_context) != self->cache_view)
+            self->background_dirty = TRUE;
+        }
+
       if (needs_repaint (self, flags))
         {
           ClutterActorBox source_actor_box;
@@ -750,7 +1225,8 @@ gb_blur_effect_paint_node (ClutterEffect           *effect,
           if (!update_framebuffers (self, paint_context, &source_actor_box))
             goto fail;
 
-          blur_node = create_blur_nodes (self, node, paint_opacity);
+          blur_node = self->use_kawase ? create_kawase_nodes (self, node, paint_opacity)
+                                       : create_blur_nodes (self, node, paint_opacity);
 
           switch (self->mode)
             {
@@ -760,6 +1236,11 @@ gb_blur_effect_paint_node (ClutterEffect           *effect,
 
             case GB_BLUR_MODE_BACKGROUND:
               paint_background (self, blur_node, paint_context, &source_actor_box);
+              self->cache_box = source_actor_box;
+              self->cache_view = clutter_paint_context_get_stage_view (paint_context);
+              self->cache_complete = self->cache_view != NULL &&
+                                     box_within_view (paint_context, &source_actor_box);
+              self->background_dirty = FALSE;
               break;
             }
         }
@@ -806,6 +1287,8 @@ gb_blur_effect_finalize (GObject *object)
   g_clear_object (&self->background_fb.pipeline);
   g_clear_object (&self->brightness_fb.pipeline);
   g_clear_object (&self->mask_fb.pipeline);
+  g_clear_object (&self->kawase_final_pipeline);
+  clear_kawase (self);
 
   G_OBJECT_CLASS (gb_blur_effect_parent_class)->finalize (object);
 }
@@ -834,6 +1317,10 @@ gb_blur_effect_get_property (GObject    *object,
 
     case PROP_CORNER_RADIUS:
       g_value_set_float (value, self->corner_radius);
+      break;
+
+    case PROP_CACHE_BACKGROUND:
+      g_value_set_boolean (value, self->cache_background);
       break;
 
     default:
@@ -867,6 +1354,16 @@ gb_blur_effect_set_property (GObject      *object,
       gb_blur_effect_set_corner_radius (self, g_value_get_float (value));
       break;
 
+    case PROP_CACHE_BACKGROUND:
+      if (self->cache_background != g_value_get_boolean (value))
+        {
+          self->cache_background = g_value_get_boolean (value);
+          self->background_dirty = TRUE;
+          if (self->actor)
+            clutter_effect_queue_repaint (CLUTTER_EFFECT (self));
+        }
+      break;
+
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
     }
@@ -884,6 +1381,8 @@ gb_blur_effect_class_init (GbBlurEffectClass *klass)
   object_class->set_property = gb_blur_effect_set_property;
 
   meta_class->set_actor = gb_blur_effect_set_actor;
+
+  kawase_disabled = g_strcmp0 (g_getenv ("NORVI_BLUR_ALGORITHM"), "gaussian") == 0;
 
   effect_class->paint_node = gb_blur_effect_paint_node;
 
@@ -908,6 +1407,11 @@ gb_blur_effect_class_init (GbBlurEffectClass *klass)
                         0.f, G_MAXFLOAT, 0.f,
                         G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_EXPLICIT_NOTIFY);
 
+  properties[PROP_CACHE_BACKGROUND] =
+    g_param_spec_boolean ("cache-background", NULL, NULL,
+                          FALSE,
+                          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
   g_object_class_install_properties (object_class, N_PROPS, properties);
 }
 
@@ -916,6 +1420,7 @@ gb_blur_effect_init (GbBlurEffect *self)
 {
   self->mode = GB_BLUR_MODE_ACTOR;
   self->radius = 0;
+  self->background_dirty = TRUE;
   self->brightness = 1.f;
   self->corner_radius = 0.f;
 
@@ -929,6 +1434,41 @@ gb_blur_effect_init (GbBlurEffect *self)
     cogl_pipeline_get_uniform_location (self->mask_fb.pipeline, "u_corner_radius");
   self->mask_size_uniform =
     cogl_pipeline_get_uniform_location (self->mask_fb.pipeline, "u_size");
+
+  self->kawase_final_pipeline = create_kawase_final_pipeline ();
+  self->kf_brightness_uniform =
+    cogl_pipeline_get_uniform_location (self->kawase_final_pipeline, "brightness");
+  self->kf_corner_radius_uniform =
+    cogl_pipeline_get_uniform_location (self->kawase_final_pipeline, "u_corner_radius");
+  self->kf_size_uniform =
+    cogl_pipeline_get_uniform_location (self->kawase_final_pipeline, "u_size");
+  self->kf_brightness = self->kf_corner_radius = self->kf_width = self->kf_height = -1.f;
+  self->last_brightness = self->last_corner_radius = -1.f;
+  self->last_mask_width = self->last_mask_height = -1.f;
+  self->last_paint_opacity = -1;
+}
+
+/**
+ * gb_blur_effect_invalidate:
+ * @self: a #GbBlurEffect
+ *
+ * Tells a background blur with #GbBlurEffect:cache-background set that what is
+ * behind its actor changed, and queues a full repaint of the actor so the next
+ * capture sees a freshly composited backdrop.
+ */
+void
+gb_blur_effect_invalidate (GbBlurEffect *self)
+{
+  g_return_if_fail (GB_IS_BLUR_EFFECT (self));
+
+  /* A pending capture already has its full repaint queued: invalidations
+   * between frames (several damaged windows below) collapse into one. */
+  if (self->background_dirty && self->cache_flags & BLUR_APPLIED)
+    return;
+
+  self->background_dirty = TRUE;
+  if (self->actor)
+    clutter_effect_queue_repaint (CLUTTER_EFFECT (self));
 }
 
 GbBlurEffect *
@@ -1007,12 +1547,22 @@ gb_blur_effect_set_mode (GbBlurEffect *self,
     return;
 
   self->mode = mode;
-  self->cache_flags &= ~BLUR_APPLIED;
+  self->cache_flags = 0;
+
+  /* The two modes size their targets differently and share the size fields,
+   * so drop every target and let the next paint allocate for the new mode. */
+  clear_framebuffer_data (&self->actor_fb);
+  clear_framebuffer_data (&self->brightness_fb);
+  clear_framebuffer_data (&self->mask_fb);
+  self->tex_width = 0;
+  self->tex_height = 0;
+  self->background_dirty = TRUE;
 
   switch (mode)
     {
     case GB_BLUR_MODE_ACTOR:
       clear_framebuffer_data (&self->background_fb);
+      clear_kawase (self);
       break;
 
     case GB_BLUR_MODE_BACKGROUND:
