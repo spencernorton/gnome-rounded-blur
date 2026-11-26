@@ -2,7 +2,7 @@
 
 All notable changes to this packaging of GNOME Rounded Blur are documented here.
 
-## Unreleased
+## 2.0.0 — 2026-11-26
 
 - Background blur reuses its GPU render targets across paints and applies
   brightness and rounded corners in the final pass. Actor blur keeps its
