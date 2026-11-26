@@ -1,3 +1,11 @@
+gnome-rounded-blur (2.0.0~rc1-1) resolute; urgency=medium
+
+  * Reuse background blur targets and expose opt-in backdrop invalidation.
+  * Skip empty render targets during window animations.
+  * Keep the Blur-1.0 typelib and existing library ABI.
+
+ -- NorviTechGH <12041021+NorviTechGH@users.noreply.github.com>  Thu, 26 Nov 2026 00:00:00 +0000
+
 gnome-rounded-blur (1.0.2-1) resolute; urgency=medium
 
   * First release from github.com/spencercnorton/gnome-rounded-blur, on

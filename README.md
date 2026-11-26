@@ -30,7 +30,7 @@ composited. Extensions such as XDock use the library; it has no standalone windo
 
 This is the Ubuntu packaging of [kancko/gnome-rounded-blur](https://github.com/kancko/gnome-rounded-blur), a copy of gnome-shell's
 [ShellBlurEffect](https://github.com/GNOME/gnome-shell/blob/main/src/shell-blur-effect.c)
-with a corner mask added and its GIR namespace changed to `Blur`. It carries upstream's code plus two small changes, listed below. It is
+with a corner mask added and its GIR namespace changed to `Blur`. The downstream rendering and packaging changes are listed below. It is
 the library behind the rounded blur of the [NorviOS](https://github.com/spencernorton/norvi-os) desktop's dock, menus and windows.
 
 ## What it does
@@ -98,8 +98,7 @@ class RoundedBlur extends Blur.BlurEffect {
 
 ## What this fork changes
 
-Both changes are small and meant for upstream:
-
+- **Reuse background render targets.** A dual Kawase filter keeps its downsample and upsample textures between paints. Existing callers redraw the backdrop on each paint. An extension that tracks changes behind a glass actor can set `cache_background = true` and call `effect.invalidate()` for affected backdrops. This includes restacking, animation and wallpaper changes. Caching defaults to off. For a Gaussian comparison or rollback, set `NORVI_BLUR_ALGORITHM=gaussian` in the Shell process environment before startup.
 - **The mutter ABI is a meson option** (`mutter_api_version`) instead of a hardcoded `18`. The Debian build derives it from the
   installed `libmutter-*-dev`.
 - **Moving the effect to another actor resets its cache.** The cached content, texture size and downscale factor are cleared in

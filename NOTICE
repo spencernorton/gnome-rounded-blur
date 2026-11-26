@@ -10,7 +10,16 @@ gnome-shell's src/shell-blur-effect.c and .h, Copyright 2019 Georges Basile
 Stavracas Neto, extended upstream with a corner mask and exported under the
 "Blur" GObject Introspection namespace.
 
-Everything here is licensed under the GNU General Public License, version 3
+Copyright 2019 Georges Basile Stavracas Neto <georges.stavracas@gmail.com>
+
+The dual Kawase sampling kernels in src/rounded-blur-effect.c are adapted from
+KWin's blur effect, originally contributed by Alex Nemeth in 2018 and maintained
+by the KWin contributors. The source shaders are downsample.frag and
+upsample.frag under src/plugins/blur/shaders at revision
+4ed66a44227267e6d5bfa122edeed7366466d8b7 of https://invent.kde.org/plasma/kwin.
+KWin distributes its blur effect under GPL-2.0-or-later.
+
+The combined work is licensed under the GNU General Public License, version 3
 or (at your option) any later version; see LICENSE. The Debian packaging,
 tests, CI and the changes listed in the README are Copyright 2026 Spencer
 Norton under the same licence.

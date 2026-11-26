@@ -1,6 +1,6 @@
 /* rounded-blur-effect.h
  *
- * Copyright 2019 Georges Basile Stavracas Neto <georges.stavracas@gmail.com>
+ * Copyright 2019 Georges Basile Stavracas Neto
  * Copyright 2025 GNOME Rounded Blur
  *
  * This program is free software: you can redistribute it and/or modify
@@ -55,5 +55,7 @@ void gb_blur_effect_set_mode (GbBlurEffect *self,
 float gb_blur_effect_get_corner_radius (GbBlurEffect *self);
 void gb_blur_effect_set_corner_radius (GbBlurEffect *self,
                                         float          corner_radius);
+
+void gb_blur_effect_invalidate (GbBlurEffect *self);
 
 G_END_DECLS

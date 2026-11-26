@@ -10,10 +10,13 @@ License: GPL-3.0-or-later
 Files: src/rounded-blur-effect.c src/rounded-blur-effect.h
 Copyright: 2019 Georges Basile Stavracas Neto <georges.stavracas@gmail.com>
            2025 GNOME Rounded Blur
+ 2018 Alex Nemeth and the KWin contributors (dual Kawase sampling kernels)
 License: GPL-3.0-or-later
 Comment:
  Derived from gnome-shell's src/shell-blur-effect.{c,h}, extended with
  corner-mask clipping and exported under the "Blur" GIR namespace.
+ The dual Kawase downsample and upsample kernels are adapted from the
+ GPL-2.0-or-later KWin blur effect. See NOTICE for source provenance.
 
 Files: debian/* meson_options.txt tests/* .github/* scripts/* README.md CHANGELOG.md NOTICE CONTRIBUTING.md SECURITY.md SUPPORT.md
 Copyright: 2026 Spencer Norton

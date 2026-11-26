@@ -11,3 +11,9 @@ const pspec = GObject.Object.find_property.call(Blur.BlurEffect, 'corner-radius'
 if (Blur.BlurEffect.$gtype.name !== 'GbBlurEffect' || !pspec)
     throw new Error('Blur.BlurEffect or its corner-radius property is missing');
 print(`ok: ${Blur.BlurEffect.$gtype.name} has ${pspec.name}`);
+
+const cache = GObject.Object.find_property.call(Blur.BlurEffect, 'cache-background');
+if (!cache || cache.default_value !== false ||
+    typeof Blur.BlurEffect.prototype.invalidate !== 'function')
+    throw new Error('Expected opt-in background caching and invalidate()');
+print('ok: background caching is opt-in');
