@@ -2,7 +2,7 @@
 
 All notable changes to this packaging of GNOME Rounded Blur are documented here.
 
-## 2.1.0 (unreleased)
+## 2.1.0 — 2026-11-28
 
 - Release offscreen blur framebuffers and detach pipeline texture references
   automatically after an actor remains unmapped for `unmap-release-delay` ms
