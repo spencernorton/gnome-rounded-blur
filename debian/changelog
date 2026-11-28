@@ -1,3 +1,10 @@
+gnome-rounded-blur (2.1.0-1) resolute; urgency=medium
+
+  * Release automatic unmapped blur target reclamation, pipeline texture
+    detachment, continuous squircle corner exponent, and final-pass dither.
+
+ -- NorviTechGH <12041021+NorviTechGH@users.noreply.github.com>  Sat, 28 Nov 2026 12:12:00 +0000
+
 gnome-rounded-blur (2.1.0~rc1-1) resolute; urgency=medium
 
   * Release unmapped actor blur render targets after a grace period and detach
