@@ -2,6 +2,18 @@
 
 All notable changes to this packaging of GNOME Rounded Blur are documented here.
 
+## 2.1.0 (unreleased)
+
+- Release offscreen blur framebuffers and detach pipeline texture references
+  automatically after an actor remains unmapped for `unmap-release-delay` ms
+  (default `2000`), and expose `release_targets()` for explicit cleanup.
+  Remapping marks the backdrop dirty so restored windows never flash a stale
+  cached frame.
+- Fold an optional continuous squircle mask (`corner-exponent`, `2.0` circular
+  default up to `5.0`, `3.0` continuous squircle) and deterministic 1/255
+  interleaved gradient noise dither (`dither`, default `true`) into the final
+  composite pass with zero additional framebuffers.
+
 ## 2.0.0 — 2026-11-26
 
 - Background blur reuses its GPU render targets across paints and applies
