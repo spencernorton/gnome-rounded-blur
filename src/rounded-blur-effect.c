@@ -33,7 +33,8 @@ static const gchar *brightness_glsl =
 
 static const gchar *mask_glsl_declarations =
 "uniform float u_corner_radius;                                            \n"
-"uniform vec2  u_size;                                                     \n";
+"uniform vec2  u_size;                                                     \n"
+"uniform float u_corner_exponent;                                          \n";
 
 static const gchar *mask_glsl =
 "  vec2 uv = cogl_tex_coord_in[0].st;                                      \n"
@@ -47,12 +48,49 @@ static const gchar *mask_glsl =
 "    {                                                                     \n"
 "      vec2 p = uv * size;                                                 \n"
 "      vec2 q = abs(p - half_size) - max(half_size - radius, vec2(0.0));   \n"
-"      float dist = length(max(q, vec2(0.0))) - radius;                    \n"
+"      float dist;                                                         \n"
+"      if (u_corner_exponent <= 2.01)                                      \n"
+"        {                                                                 \n"
+"          dist = length(max(q, vec2(0.0))) - radius;                      \n"
+"        }                                                                 \n"
+"      else                                                                \n"
+"        {                                                                 \n"
+"          vec2 qc = max(q, vec2(0.0));                                    \n"
+"          float mc = max(qc.x, qc.y);                                     \n"
+"          if (mc <= 0.0)                                                  \n"
+"            {                                                             \n"
+"              dist = max(q.x, q.y) - radius;                              \n"
+"            }                                                             \n"
+"          else                                                            \n"
+"            {                                                             \n"
+"              float rmin = min(qc.x, qc.y) / mc;                          \n"
+"              float lp = (rmin > 0.0)                                     \n"
+"                ? mc * pow(1.0 + pow(rmin, u_corner_exponent),            \n"
+"                           1.0 / u_corner_exponent)                       \n"
+"                : mc;                                                     \n"
+"              dist = lp - radius;                                         \n"
+"            }                                                             \n"
+"        }                                                                 \n"
 "      float aa = max(fwidth(dist) * 0.5, 0.5);                            \n"
 "      m = 1.0 - smoothstep(-aa, aa, dist);                                \n"
 "    }                                                                     \n"
 "  cogl_color_out.rgb *= m;                                                \n"
 "  cogl_color_out.a   *= m;                                                \n";
+
+static const gchar *dither_glsl_declarations =
+"uniform float u_dither;                                                   \n";
+
+static const gchar *dither_glsl =
+"  if (u_dither > 0.5 && cogl_color_out.a > 0.0)                           \n"
+"    {                                                                     \n"
+"      float ign = fract(52.9829189 *                                      \n"
+"                        fract(dot(gl_FragCoord.xy,                        \n"
+"                                  vec2(0.06711056, 0.00583715))));        \n"
+"      float delta = ((ign - 0.5) / 255.0) * cogl_color_out.a;             \n"
+"      cogl_color_out.rgb = clamp(cogl_color_out.rgb + vec3(delta),        \n"
+"                                 vec3(0.0),                               \n"
+"                                 vec3(cogl_color_out.a));                 \n"
+"    }                                                                     \n";
 
 /* Dual Kawase blur (Marius Bjørge, SIGGRAPH 2015), using the kernels of KWin's
  * blur effect (src/plugins/blur/shaders/downsample.frag and upsample.frag).
@@ -124,6 +162,7 @@ struct _GbBlurEffect
   FramebufferData mask_fb;
   int corner_radius_uniform;
   int mask_size_uniform;
+  int corner_exponent_uniform;
 
   GbBlurMode mode;
   float downscale_factor;
@@ -131,6 +170,12 @@ struct _GbBlurEffect
   int radius;
 
   float corner_radius;
+  float corner_exponent;
+  gboolean dither;
+
+  gulong actor_mapped_id;
+  guint unmap_release_id;
+  guint unmap_release_delay_ms;
 
   /* Dual Kawase chain for BACKGROUND mode. Every target is allocated when the
    * size or pass count changes and reused on every other frame: no texture or
@@ -162,12 +207,17 @@ struct _GbBlurEffect
   int kf_brightness_uniform;
   int kf_corner_radius_uniform;
   int kf_size_uniform;
+  int kf_corner_exponent_uniform;
+  int kf_dither_uniform;
   float kf_brightness;
   float kf_corner_radius;
+  float kf_corner_exponent;
+  int kf_dither;
   float kf_width;
   float kf_height;
   float last_brightness;
   float last_corner_radius;
+  float last_corner_exponent;
   float last_mask_width;
   float last_mask_height;
   int last_paint_opacity;
@@ -187,6 +237,9 @@ enum {
   PROP_BRIGHTNESS,
   PROP_MODE,
   PROP_CORNER_RADIUS,
+  PROP_CORNER_EXPONENT,
+  PROP_DITHER,
+  PROP_UNMAP_RELEASE_DELAY,
   PROP_CACHE_BACKGROUND,
   N_PROPS
 };
@@ -277,6 +330,12 @@ create_kawase_final_pipeline (void)
                                   brightness_glsl);
       cogl_pipeline_add_snippet (final_pipeline, snippet);
       g_object_unref (snippet);
+
+      snippet = cogl_snippet_new (COGL_SNIPPET_HOOK_FRAGMENT,
+                                  dither_glsl_declarations,
+                                  dither_glsl);
+      cogl_pipeline_add_snippet (final_pipeline, snippet);
+      g_object_unref (snippet);
     }
 
   return cogl_pipeline_copy (final_pipeline);
@@ -300,6 +359,18 @@ update_kawase_final (GbBlurEffect *self,
       self->kf_corner_radius = self->corner_radius;
       if (self->kf_corner_radius_uniform > -1)
         cogl_pipeline_set_uniform_1f (p, self->kf_corner_radius_uniform, self->corner_radius);
+    }
+  if (self->kf_corner_exponent != self->corner_exponent)
+    {
+      self->kf_corner_exponent = self->corner_exponent;
+      if (self->kf_corner_exponent_uniform > -1)
+        cogl_pipeline_set_uniform_1f (p, self->kf_corner_exponent_uniform, self->corner_exponent);
+    }
+  if (self->kf_dither != (int) self->dither)
+    {
+      self->kf_dither = (int) self->dither;
+      if (self->kf_dither_uniform > -1)
+        cogl_pipeline_set_uniform_1f (p, self->kf_dither_uniform, self->dither ? 1.f : 0.f);
     }
   if (self->kf_width != width || self->kf_height != height)
     {
@@ -346,16 +417,23 @@ update_mask_uniforms (GbBlurEffect *self,
     return;
 
   if (self->last_mask_width == width && self->last_mask_height == height &&
-      self->last_corner_radius == self->corner_radius)
+      self->last_corner_radius == self->corner_radius &&
+      self->last_corner_exponent == self->corner_exponent)
     return;
   self->last_mask_width = width;
   self->last_mask_height = height;
   self->last_corner_radius = self->corner_radius;
+  self->last_corner_exponent = self->corner_exponent;
 
   if (self->corner_radius_uniform > -1)
     cogl_pipeline_set_uniform_1f (self->mask_fb.pipeline,
                                   self->corner_radius_uniform,
                                   self->corner_radius);
+
+  if (self->corner_exponent_uniform > -1)
+    cogl_pipeline_set_uniform_1f (self->mask_fb.pipeline,
+                                  self->corner_exponent_uniform,
+                                  self->corner_exponent);
 
   if (self->mask_size_uniform > -1)
   {
@@ -691,16 +769,26 @@ calculate_downscale_factor (float width,
   return downscale_factor;
 }
 
-static void
-gb_blur_effect_set_actor (ClutterActorMeta *meta,
-                           ClutterActor     *actor)
+static gboolean
+has_allocated_targets (GbBlurEffect *self)
 {
-  GbBlurEffect *self = GB_BLUR_EFFECT (meta);
-  ClutterActorMetaClass *meta_class;
+  return self->tex_width > 0 ||
+         self->actor_fb.framebuffer != NULL ||
+         self->background_fb.framebuffer != NULL ||
+         self->brightness_fb.framebuffer != NULL ||
+         self->mask_fb.framebuffer != NULL ||
+         self->kawase_down[0].framebuffer != NULL;
+}
 
-  meta_class = CLUTTER_ACTOR_META_CLASS (gb_blur_effect_parent_class);
-  meta_class->set_actor (meta, actor);
+static void
+cancel_unmap_release (GbBlurEffect *self)
+{
+  g_clear_handle_id (&self->unmap_release_id, g_source_remove);
+}
 
+static void
+release_framebuffers (GbBlurEffect *self)
+{
   /* clear out the previous state */
   clear_framebuffer_data (&self->actor_fb);
   clear_framebuffer_data (&self->background_fb);
@@ -708,8 +796,21 @@ gb_blur_effect_set_actor (ClutterActorMeta *meta,
   clear_framebuffer_data (&self->mask_fb);
   clear_kawase (self);
 
-  /* A new actor must not reuse the old one's cached content, or its texture
-   * size to decide whether the framebuffers still fit. */
+  /* Detach released textures from persistent pipelines so Cogl drops its
+   * GPU references immediately instead of pinning VRAM on layer 0. */
+  if (self->actor_fb.pipeline)
+    cogl_pipeline_set_layer_null_texture (self->actor_fb.pipeline, 0);
+  if (self->background_fb.pipeline)
+    cogl_pipeline_set_layer_null_texture (self->background_fb.pipeline, 0);
+  if (self->brightness_fb.pipeline)
+    cogl_pipeline_set_layer_null_texture (self->brightness_fb.pipeline, 0);
+  if (self->mask_fb.pipeline)
+    cogl_pipeline_set_layer_null_texture (self->mask_fb.pipeline, 0);
+  if (self->kawase_final_pipeline)
+    cogl_pipeline_set_layer_null_texture (self->kawase_final_pipeline, 0);
+
+  /* A new actor or restored window must not reuse old cached content, or the
+   * previous texture size to decide whether framebuffers still fit. */
   self->cache_flags = 0;
   self->background_dirty = TRUE;
   self->cache_view = NULL;
@@ -717,9 +818,81 @@ gb_blur_effect_set_actor (ClutterActorMeta *meta,
   self->tex_width = 0;
   self->tex_height = 0;
   self->downscale_factor = 1.f;
+}
+
+static gboolean
+on_unmap_release_timeout (gpointer user_data)
+{
+  GbBlurEffect *self = GB_BLUR_EFFECT (user_data);
+
+  self->unmap_release_id = 0;
+
+  if (self->actor && clutter_actor_is_mapped (self->actor))
+    return G_SOURCE_REMOVE;
+
+  release_framebuffers (self);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+schedule_unmap_release (GbBlurEffect *self)
+{
+  cancel_unmap_release (self);
+
+  if (self->unmap_release_delay_ms == 0 || !has_allocated_targets (self))
+    return;
+
+  self->unmap_release_id = g_timeout_add (self->unmap_release_delay_ms,
+                                          on_unmap_release_timeout,
+                                          self);
+}
+
+static void
+on_actor_mapped_changed (ClutterActor *actor,
+                         GParamSpec   *pspec,
+                         GbBlurEffect *self)
+{
+  (void) pspec;
+
+  if (clutter_actor_is_mapped (actor))
+    {
+      cancel_unmap_release (self);
+      /* Force a fresh backdrop capture on remap so windows restored from
+       * minimization or another workspace never flash a stale frame. */
+      self->background_dirty = TRUE;
+    }
+  else
+    {
+      schedule_unmap_release (self);
+    }
+}
+
+static void
+gb_blur_effect_set_actor (ClutterActorMeta *meta,
+                           ClutterActor     *actor)
+{
+  GbBlurEffect *self = GB_BLUR_EFFECT (meta);
+  ClutterActorMetaClass *meta_class;
+
+  cancel_unmap_release (self);
+  if (self->actor)
+    g_clear_signal_handler (&self->actor_mapped_id, self->actor);
+
+  meta_class = CLUTTER_ACTOR_META_CLASS (gb_blur_effect_parent_class);
+  meta_class->set_actor (meta, actor);
+
+  release_framebuffers (self);
 
   /* we keep a back pointer here, to avoid going through the ActorMeta */
   self->actor = clutter_actor_meta_get_actor (meta);
+
+  if (self->actor)
+    {
+      self->actor_mapped_id = g_signal_connect (self->actor,
+                                                "notify::mapped",
+                                                G_CALLBACK (on_actor_mapped_changed),
+                                                self);
+    }
 }
 
 static void
@@ -1174,6 +1347,8 @@ gb_blur_effect_paint_node (ClutterEffect           *effect,
 
   g_assert (self->actor != NULL);
 
+  cancel_unmap_release (self);
+
   if (self->radius > 0)
     {
       g_autoptr (ClutterPaintNode) blur_node = NULL;
@@ -1263,6 +1438,9 @@ gb_blur_effect_paint_node (ClutterEffect           *effect,
           break;
         }
 
+      if (!clutter_actor_is_mapped (self->actor))
+        schedule_unmap_release (self);
+
       return;
     }
 
@@ -1274,9 +1452,26 @@ fail:
 }
 
 static void
+gb_blur_effect_dispose (GObject *object)
+{
+  GbBlurEffect *self = (GbBlurEffect *)object;
+
+  G_OBJECT_CLASS (gb_blur_effect_parent_class)->dispose (object);
+
+  cancel_unmap_release (self);
+  if (self->actor)
+    {
+      g_clear_signal_handler (&self->actor_mapped_id, self->actor);
+      self->actor = NULL;
+    }
+}
+
+static void
 gb_blur_effect_finalize (GObject *object)
 {
   GbBlurEffect *self = (GbBlurEffect *)object;
+
+  cancel_unmap_release (self);
 
   clear_framebuffer_data (&self->actor_fb);
   clear_framebuffer_data (&self->background_fb);
@@ -1319,6 +1514,18 @@ gb_blur_effect_get_property (GObject    *object,
       g_value_set_float (value, self->corner_radius);
       break;
 
+    case PROP_CORNER_EXPONENT:
+      g_value_set_float (value, self->corner_exponent);
+      break;
+
+    case PROP_DITHER:
+      g_value_set_boolean (value, self->dither);
+      break;
+
+    case PROP_UNMAP_RELEASE_DELAY:
+      g_value_set_uint (value, self->unmap_release_delay_ms);
+      break;
+
     case PROP_CACHE_BACKGROUND:
       g_value_set_boolean (value, self->cache_background);
       break;
@@ -1354,6 +1561,18 @@ gb_blur_effect_set_property (GObject      *object,
       gb_blur_effect_set_corner_radius (self, g_value_get_float (value));
       break;
 
+    case PROP_CORNER_EXPONENT:
+      gb_blur_effect_set_corner_exponent (self, g_value_get_float (value));
+      break;
+
+    case PROP_DITHER:
+      gb_blur_effect_set_dither (self, g_value_get_boolean (value));
+      break;
+
+    case PROP_UNMAP_RELEASE_DELAY:
+      gb_blur_effect_set_unmap_release_delay (self, g_value_get_uint (value));
+      break;
+
     case PROP_CACHE_BACKGROUND:
       if (self->cache_background != g_value_get_boolean (value))
         {
@@ -1376,6 +1595,7 @@ gb_blur_effect_class_init (GbBlurEffectClass *klass)
   ClutterActorMetaClass *meta_class = CLUTTER_ACTOR_META_CLASS (klass);
   ClutterEffectClass *effect_class = CLUTTER_EFFECT_CLASS (klass);
 
+  object_class->dispose = gb_blur_effect_dispose;
   object_class->finalize = gb_blur_effect_finalize;
   object_class->get_property = gb_blur_effect_get_property;
   object_class->set_property = gb_blur_effect_set_property;
@@ -1407,6 +1627,21 @@ gb_blur_effect_class_init (GbBlurEffectClass *klass)
                         0.f, G_MAXFLOAT, 0.f,
                         G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_EXPLICIT_NOTIFY);
 
+  properties[PROP_CORNER_EXPONENT] =
+    g_param_spec_float ("corner-exponent", NULL, NULL,
+                        2.f, 5.f, 2.f,
+                        G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_EXPLICIT_NOTIFY);
+
+  properties[PROP_DITHER] =
+    g_param_spec_boolean ("dither", NULL, NULL,
+                          TRUE,
+                          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_EXPLICIT_NOTIFY);
+
+  properties[PROP_UNMAP_RELEASE_DELAY] =
+    g_param_spec_uint ("unmap-release-delay", NULL, NULL,
+                       0, 60000, 2000,
+                       G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_EXPLICIT_NOTIFY);
+
   properties[PROP_CACHE_BACKGROUND] =
     g_param_spec_boolean ("cache-background", NULL, NULL,
                           FALSE,
@@ -1423,6 +1658,9 @@ gb_blur_effect_init (GbBlurEffect *self)
   self->background_dirty = TRUE;
   self->brightness = 1.f;
   self->corner_radius = 0.f;
+  self->corner_exponent = 2.f;
+  self->dither = TRUE;
+  self->unmap_release_delay_ms = 2000;
 
   self->actor_fb.pipeline = create_base_pipeline ();
   self->background_fb.pipeline = create_base_pipeline ();
@@ -1434,6 +1672,8 @@ gb_blur_effect_init (GbBlurEffect *self)
     cogl_pipeline_get_uniform_location (self->mask_fb.pipeline, "u_corner_radius");
   self->mask_size_uniform =
     cogl_pipeline_get_uniform_location (self->mask_fb.pipeline, "u_size");
+  self->corner_exponent_uniform =
+    cogl_pipeline_get_uniform_location (self->mask_fb.pipeline, "u_corner_exponent");
 
   self->kawase_final_pipeline = create_kawase_final_pipeline ();
   self->kf_brightness_uniform =
@@ -1442,8 +1682,14 @@ gb_blur_effect_init (GbBlurEffect *self)
     cogl_pipeline_get_uniform_location (self->kawase_final_pipeline, "u_corner_radius");
   self->kf_size_uniform =
     cogl_pipeline_get_uniform_location (self->kawase_final_pipeline, "u_size");
-  self->kf_brightness = self->kf_corner_radius = self->kf_width = self->kf_height = -1.f;
-  self->last_brightness = self->last_corner_radius = -1.f;
+  self->kf_corner_exponent_uniform =
+    cogl_pipeline_get_uniform_location (self->kawase_final_pipeline, "u_corner_exponent");
+  self->kf_dither_uniform =
+    cogl_pipeline_get_uniform_location (self->kawase_final_pipeline, "u_dither");
+  self->kf_brightness = self->kf_corner_radius = self->kf_corner_exponent = -1.f;
+  self->kf_width = self->kf_height = -1.f;
+  self->kf_dither = -1;
+  self->last_brightness = self->last_corner_radius = self->last_corner_exponent = -1.f;
   self->last_mask_width = self->last_mask_height = -1.f;
   self->last_paint_opacity = -1;
 }
@@ -1456,6 +1702,98 @@ gb_blur_effect_init (GbBlurEffect *self)
  * behind its actor changed, and queues a full repaint of the actor so the next
  * capture sees a freshly composited backdrop.
  */
+float
+gb_blur_effect_get_corner_exponent (GbBlurEffect *self)
+{
+  g_return_val_if_fail (GB_IS_BLUR_EFFECT (self), 2.f);
+
+  return self->corner_exponent;
+}
+
+void
+gb_blur_effect_set_corner_exponent (GbBlurEffect *self,
+                                    float          corner_exponent)
+{
+  g_return_if_fail (GB_IS_BLUR_EFFECT (self));
+
+  corner_exponent = CLAMP (corner_exponent, 2.f, 5.f);
+  if (G_APPROX_VALUE (self->corner_exponent, corner_exponent, FLT_EPSILON))
+    return;
+
+  self->corner_exponent = corner_exponent;
+
+  if (self->actor)
+    clutter_effect_queue_repaint (CLUTTER_EFFECT (self));
+
+  g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_CORNER_EXPONENT]);
+}
+
+gboolean
+gb_blur_effect_get_dither (GbBlurEffect *self)
+{
+  g_return_val_if_fail (GB_IS_BLUR_EFFECT (self), TRUE);
+
+  return self->dither;
+}
+
+void
+gb_blur_effect_set_dither (GbBlurEffect *self,
+                           gboolean      dither)
+{
+  g_return_if_fail (GB_IS_BLUR_EFFECT (self));
+
+  dither = !!dither;
+  if (self->dither == dither)
+    return;
+
+  self->dither = dither;
+
+  if (self->actor)
+    clutter_effect_queue_repaint (CLUTTER_EFFECT (self));
+
+  g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_DITHER]);
+}
+
+guint
+gb_blur_effect_get_unmap_release_delay (GbBlurEffect *self)
+{
+  g_return_val_if_fail (GB_IS_BLUR_EFFECT (self), 0);
+
+  return self->unmap_release_delay_ms;
+}
+
+void
+gb_blur_effect_set_unmap_release_delay (GbBlurEffect *self,
+                                        guint         delay_ms)
+{
+  g_return_if_fail (GB_IS_BLUR_EFFECT (self));
+
+  delay_ms = MIN (delay_ms, 60000);
+  if (self->unmap_release_delay_ms == delay_ms)
+    return;
+
+  self->unmap_release_delay_ms = delay_ms;
+
+  if (self->actor && !clutter_actor_is_mapped (self->actor))
+    {
+      if (delay_ms == 0)
+        cancel_unmap_release (self);
+      else
+        schedule_unmap_release (self);
+    }
+
+  g_object_notify_by_pspec (G_OBJECT (self), properties[PROP_UNMAP_RELEASE_DELAY]);
+}
+
+void
+gb_blur_effect_release_targets (GbBlurEffect *self)
+{
+  g_return_if_fail (GB_IS_BLUR_EFFECT (self));
+
+  cancel_unmap_release (self);
+  release_framebuffers (self);
+}
+
 void
 gb_blur_effect_invalidate (GbBlurEffect *self)
 {

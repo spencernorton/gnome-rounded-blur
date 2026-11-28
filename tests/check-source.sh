@@ -22,4 +22,8 @@ if grep -Eq "dependency\('libmutter-[0-9]+'\)" meson.build; then
   echo "meson.build hardcodes a mutter ABI again" >&2; exit 1
 fi
 
+# Unmapped actors must cancel timers and clear pipeline texture refs on release.
+require src/rounded-blur-effect.c '  g_clear_handle_id (&self->unmap_release_id, g_source_remove);'
+require src/rounded-blur-effect.c '    cogl_pipeline_set_layer_null_texture (self->kawase_final_pipeline, 0);'
+
 echo "source invariants: ok"

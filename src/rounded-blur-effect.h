@@ -56,6 +56,19 @@ float gb_blur_effect_get_corner_radius (GbBlurEffect *self);
 void gb_blur_effect_set_corner_radius (GbBlurEffect *self,
                                         float          corner_radius);
 
+float gb_blur_effect_get_corner_exponent (GbBlurEffect *self);
+void gb_blur_effect_set_corner_exponent (GbBlurEffect *self,
+                                         float          corner_exponent);
+
+gboolean gb_blur_effect_get_dither (GbBlurEffect *self);
+void gb_blur_effect_set_dither (GbBlurEffect *self,
+                                gboolean      dither);
+
+guint gb_blur_effect_get_unmap_release_delay (GbBlurEffect *self);
+void gb_blur_effect_set_unmap_release_delay (GbBlurEffect *self,
+                                             guint         delay_ms);
+
 void gb_blur_effect_invalidate (GbBlurEffect *self);
+void gb_blur_effect_release_targets (GbBlurEffect *self);
 
 G_END_DECLS

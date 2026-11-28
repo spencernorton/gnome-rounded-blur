@@ -1,3 +1,12 @@
+gnome-rounded-blur (2.1.0~rc1-1) resolute; urgency=medium
+
+  * Release unmapped actor blur render targets after a grace period and detach
+    pipeline texture references immediately.
+  * Add opt-in continuous squircle corner exponent and final-pass gradient
+    dithering with zero extra render targets.
+
+ -- NorviTechGH <12041021+NorviTechGH@users.noreply.github.com>  Sat, 28 Nov 2026 11:05:00 +0000
+
 gnome-rounded-blur (2.0.0-1) resolute; urgency=medium
 
   * Release persistent render targets and opt-in backdrop caching.

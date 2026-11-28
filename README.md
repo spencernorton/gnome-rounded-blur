@@ -99,6 +99,7 @@ class RoundedBlur extends Blur.BlurEffect {
 ## What this fork changes
 
 - **Reuse background render targets.** A dual Kawase filter keeps its downsample and upsample textures between paints. Existing callers redraw the backdrop on each paint. An extension that tracks changes behind a glass actor can set `cache_background = true` and call `effect.invalidate()` for affected backdrops. This includes restacking, animation and wallpaper changes. Caching defaults to off. For a Gaussian comparison or rollback, set `NORVI_BLUR_ALGORITHM=gaussian` in the Shell process environment before startup.
+- **Release GPU targets when unmapped and finish corners in the final pass.** Offscreen blur textures and pipeline texture references are freed automatically after an actor stays unmapped for `unmap-release-delay` ms (default `2000`, `0` disables), and `release_targets()` provides explicit cleanup; remapping marks the backdrop dirty so restored windows never show stale content. The final composite pass also supports optional continuous squircle corners (`corner-exponent`, default `2.0` circular, `3.0` continuous squircle) and deterministic 1/255 interleaved gradient noise dithering (`dither`, default `true`) with zero extra framebuffers.
 - **The mutter ABI is a meson option** (`mutter_api_version`) instead of a hardcoded `18`. The Debian build derives it from the
   installed `libmutter-*-dev`.
 - **Moving the effect to another actor resets its cache.** The cached content, texture size and downscale factor are cleared in
